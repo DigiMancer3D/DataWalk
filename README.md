@@ -91,7 +91,7 @@ Got ideas? Fork, PR, or ping in issues! Your input shapes the skyline. 🌃
 
 TIPS for Installation (Linux [Kubuntu] based but may help others):
 
-1. Make sure you're in the venv (source ```~/vdm_env/bin/activate```)
+1. Make sure you're in the venv: ```source ~/vdm_env/bin/activate```
 2. Install ALL the missing Python packages inside the venv:
    ```pip install --list--not--known--yet--```
 3. Go to your script folder (with quotes because of spaces):
