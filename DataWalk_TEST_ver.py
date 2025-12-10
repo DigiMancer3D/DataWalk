@@ -110,6 +110,7 @@ class DataWalk(ShowBase):
         self.current_sort_mode = 0
         self.last_index_click = {}
         self.index_click_task = {}
+        self.sorting_in_progress = False
 
         self.key_bindings = {
             "forward": ["w"],
@@ -667,6 +668,12 @@ class DataWalk(ShowBase):
     def refresh_index(self):
         if not self.index_frame:
             return
+        # Clear pending index tasks to prevent stale fires during reorg
+        for task_name in list(self.index_click_task.values()):
+            self.taskMgr.remove(task_name)
+        self.index_click_task.clear()
+        self.last_index_click.clear()
+
         canvas = self.scrolled_frame.getCanvas()
         for child in canvas.getChildren():
             child.removeNode()
@@ -676,7 +683,7 @@ class DataWalk(ShowBase):
         for entry in dir_entries:
             name = entry['name']
             btn = DirectButton(parent=canvas, text=name, command=self.handle_index_click, extraArgs=[name],
-                               pos=(0, 0, y_pos), scale=0.07, frameColor=(0,0,0,0))
+                            pos=(0, 0, y_pos), scale=0.07, frameColor=(0,0,0,0))
             y_pos -= 0.1
 
         self.scrolled_frame['canvasSize'] = (-1.2, 1.2, y_pos - 0.1, 0)
@@ -690,34 +697,37 @@ class DataWalk(ShowBase):
     def apply_sort(self):
         if not self.entries:
             return
-        mode = self.current_sort_mode
-        if mode in [3, 4]:
-            unfinished = [e for e in self.entries if e['type'] == 'dir' and e['size'] in (0, -1)]
-            if unfinished:
-                self.status_text.setText("Calculating directory sizes for sorting...")
-                self.sort_unfinished = unfinished[:]
-                self.sort_progress_count = 0
-                self.taskMgr.add(self.sort_progress_task, "sort_progress_task")
-                return
-        self.perform_sort()
+    mode = self.current_sort_mode
+    if mode in [3, 4]:
+        unfinished = [e for e in self.entries if e['type'] == 'dir' and e['size'] in (0, -1)]
+        if unfinished and not self.sorting_in_progress:
+            self.status_text.setText("Calculating directory sizes for sorting...")
+            self.sort_unfinished = unfinished[:]
+            self.sort_progress_count = 0
+            self.sorting_in_progress = True
+            self.taskMgr.remove("sort_progress_task")  # Remove any existing to prevent multiples
+            self.taskMgr.add(self.sort_progress_task, "sort_progress_task")
+            return
+    self.perform_sort()
 
     def sort_progress_task(self, task):
         to_remove = []
-        for e in self.sort_unfinished:
-            path = e['full_path']
-            if path in self.sizes and self.sizes[path] != -1:
-                e['size'] = self.sizes[path]
-                to_remove.append(e)
-        for e in to_remove:
-            self.sort_unfinished.remove(e)
-            self.sort_progress_count += 1
-        self.status_text.setText("Calculating directory sizes for sorting... {} / {}".format(self.sort_progress_count, len(self.entries)))
-        if not self.sort_unfinished:
-            self.status_text.setText("")
-            self.perform_sort()
-            self.refresh_index()
-            return Task.done
-        return Task.cont
+    for e in self.sort_unfinished:
+        path = e['full_path']
+        if path in self.sizes and self.sizes[path] != -1:
+            e['size'] = self.sizes[path]
+            to_remove.append(e)
+    for e in to_remove:
+        self.sort_unfinished.remove(e)
+        self.sort_progress_count += 1
+    self.status_text.setText("Calculating directory sizes for sorting... {} / {}".format(self.sort_progress_count, len(self.entries)))
+    if not self.sort_unfinished:
+        self.status_text.setText("")
+        self.sorting_in_progress = False  # Reset flag
+        self.perform_sort()
+        self.refresh_index()
+        return Task.done
+    return Task.cont
 
     def perform_sort(self):
         mode = self.current_sort_mode
@@ -757,7 +767,7 @@ class DataWalk(ShowBase):
         else:
             self.last_index_click[name] = now
             task_name = 'index_single_' + name
-            self.index_click_task[name] = self.taskMgr.doMethodLater(0.3, self.perform_single_index_click, task_name, extraArgs=[name])
+            self.index_click_task[name] = self.taskMgr.doMethodLater(0.3, lambda task: self.perform_single_index_click(task, name), task_name)
 
     def perform_single_index_click(self, task, name):
         if name in self.index_click_task:
@@ -768,21 +778,25 @@ class DataWalk(ShowBase):
     def resume_index(self):
         self.in_menu = False
         base.disableMouse()
-        if self.index_frame:
-            self.index_frame.destroy()
-            self.index_frame = None
-        if hasattr(self, 'sort_progress_dialog') and self.sort_progress_dialog:
-            self.sort_progress_dialog.destroy()
-            self.sort_progress_dialog = None
-        self.taskMgr.remove("sort_progress_task")
-        self.status_text.setText("")
+    if self.index_frame:
+        self.index_frame.destroy()
+        self.index_frame = None
+    if hasattr(self, 'sort_progress_dialog') and self.sort_progress_dialog:
+        self.sort_progress_dialog.destroy()
+        self.sort_progress_dialog = None
+    self.taskMgr.remove("sort_progress_task")
+    self.sorting_in_progress = False  # Reset flag
+    self.status_text.setText("")
+    self.index_click_task.clear()  # Clear any lingering tasks
+    self.last_index_click.clear()
 
     def teleport_to(self, name):
-        building = self.buildings[name]
-        b_pos = building.getPos()
-        self.camera.setPos(b_pos.x, b_pos.y - 60, 15)
-        self.camera.lookAt(b_pos.x, b_pos.y, b_pos.z + 10)
-        self.resume_index()
+       building = self.buildings[name]
+       b_pos = building.getPos()
+       self.camera.setPos(b_pos.x, b_pos.y - 60, 15)
+       self.camera.lookAt(b_pos.x, b_pos.y, b_pos.z + 10)
+       if self.in_menu:  # Prevent mid-sort interruption
+           self.resume_index()
 
     def update_fov(self):
         self.fov = self.fov_slider['value']
@@ -988,101 +1002,101 @@ class DataWalk(ShowBase):
             self.current_path = self.root_dir
             self.load_path(self.root_dir)
 
-    def load_path(self, path):
-        self.loading_dialog = DirectLabel(text="Loading directory...", scale=0.1, pos=(0,0,0))
-        self.taskMgr.step()  # Force render update to show dialog
-        print(f"Entering: {path}")
-        self.current_path = os.path.abspath(path)
-        self.path_text.setText(f"Location: {self.current_path}")
+   def load_path(self, path):
+    self.loading_dialog = DirectLabel(text="Loading directory...", scale=0.1, pos=(0,0,0))
+    # Removed self.taskMgr.step() to prevent recursive poll warnings
+    print(f"Entering: {path}")
+    self.current_path = os.path.abspath(path)
+    self.path_text.setText(f"Location: {self.current_path}")
 
-        self.buildings = {}
-        self.file_orbs = {}
-        self.entries = []
-        self.window_labels = []
-        self.building_labels = []
+    self.buildings = {}
+    self.file_orbs = {}
+    self.entries = []
+    self.window_labels = []
+    self.building_labels = []
 
-        for child in self.render.getChildren():
-            if child.hasPythonTag("vdm"):
-                child.removeNode()
+    for child in self.render.getChildren():
+        if child.hasPythonTag("vdm"):
+            child.removeNode()
 
-        ground = self.create_ground()
-        if self.history:
-            ground.setColor(0.9, 0.18, 0.18, 0.78)
-            ground.setPythonTag("type", "exit_ground")
+    ground = self.create_ground()
+    if self.history:
+        ground.setColor(0.9, 0.18, 0.18, 0.78)
+        ground.setPythonTag("type", "exit_ground")
 
-        try:
-            entries = os.listdir(path)
-            non_hidden = [e for e in entries if not e.startswith('.')]
-            hidden = [e for e in entries if e.startswith('.')]
-        except Exception as e:
-            print("Error reading dir:", e)
-            non_hidden = []
-            hidden = []
+    try:
+        entries = os.listdir(path)
+        non_hidden = [e for e in entries if not e.startswith('.')]
+        hidden = [e for e in entries if e.startswith('.')]
+    except Exception as e:
+        print("Error reading dir:", e)
+        non_hidden = []
+        hidden = []
 
-        if not non_hidden and not (self.show_hidden and hidden):
-            self.create_empty()
-            if self.loading_dialog:
-                self.loading_dialog.destroy()
-                self.loading_dialog = None
-            return
-
-        positions = self.hex_positions(len(non_hidden), spacing=self.spacing)
-        for i, name in enumerate(non_hidden):
-            full_path = os.path.join(path, name)
-            x, y = positions[i]
-
-            if os.path.isdir(full_path):
-                try:
-                    sub = [f for f in os.listdir(full_path) if not f.startswith('.')]
-                    file_count = sum(1 for f in sub if os.path.isfile(os.path.join(full_path, f)))
-                    dir_count = len(sub) - file_count
-                    files = [f for f in sub if os.path.isfile(os.path.join(full_path, f))]
-                except:
-                    file_count = dir_count = 1
-                    files = []
-                building = self.create_building(x, y, name, full_path, file_count, dir_count, files)
-                self.buildings[name] = building
-            else:
-                size = os.path.getsize(full_path) if os.access(full_path, os.R_OK) else 1024
-                self.create_file_orb(x, y, 20, name, full_path, size)
-
-        if self.show_hidden:
-            hidden_positions = self.hex_positions(len(hidden), spacing=self.spacing * 1.5)
-            for i, name in enumerate(hidden):
-                full_path = os.path.join(path, name)
-                hx, hy = hidden_positions[i]
-                hz = self.max_height + 50 + (i % 5) * 10
-                self.create_star(hx, hy, hz, name, full_path)
-
-        # Build entries list
-        for name in non_hidden:
-            full_path = os.path.join(self.current_path, name)
-            if name in self.buildings:
-                node = self.buildings[name]
-                typ = 'dir'
-                size = 0  # Lazy load for dirs
-            elif name in self.file_orbs:
-                node = self.file_orbs[name]
-                typ = 'file'
-                size = self.get_size(full_path, async_if_dir=False)  # Fast for files
-            else:
-                continue
-            try:
-                mod_time = os.path.getmtime(full_path)
-            except:
-                mod_time = 0
-            self.entries.append({'name': name, 'full_path': full_path, 'node': node, 'type': typ, 'mod_time': mod_time, 'size': size})
-
-        # Preload dir sizes in background
-        for e in [e for e in self.entries if e['type'] == 'dir']:
-            self.get_size(e['full_path'], async_if_dir=True)
-
-        self.apply_sort()
-        self.update_labels_visibility()
-        self.update_label_positions()
+    if not non_hidden and not (self.show_hidden and hidden):
+        self.create_empty()
         if self.loading_dialog:
             self.loading_dialog.destroy()
             self.loading_dialog = None
+        return
+
+    positions = self.hex_positions(len(non_hidden), spacing=self.spacing)
+    for i, name in enumerate(non_hidden):
+        full_path = os.path.join(path, name)
+        x, y = positions[i]
+
+        if os.path.isdir(full_path):
+            try:
+                sub = [f for f in os.listdir(full_path) if not f.startswith('.')]
+                file_count = sum(1 for f in sub if os.path.isfile(os.path.join(full_path, f)))
+                dir_count = len(sub) - file_count
+                files = [f for f in sub if os.path.isfile(os.path.join(full_path, f))]
+            except:
+                file_count = dir_count = 1
+                files = []
+            building = self.create_building(x, y, name, full_path, file_count, dir_count, files)
+            self.buildings[name] = building
+        else:
+            size = os.path.getsize(full_path) if os.access(full_path, os.R_OK) else 1024
+            self.create_file_orb(x, y, 20, name, full_path, size)
+
+    if self.show_hidden:
+        hidden_positions = self.hex_positions(len(hidden), spacing=self.spacing * 1.5)
+        for i, name in enumerate(hidden):
+            full_path = os.path.join(path, name)
+            hx, hy = hidden_positions[i]
+            hz = self.max_height + 50 + (i % 5) * 10
+            self.create_star(hx, hy, hz, name, full_path)
+
+    # Build entries list
+    for name in non_hidden:
+        full_path = os.path.join(self.current_path, name)
+        if name in self.buildings:
+            node = self.buildings[name]
+            typ = 'dir'
+            size = 0  # Lazy load for dirs
+        elif name in self.file_orbs:
+            node = self.file_orbs[name]
+            typ = 'file'
+            size = self.get_size(full_path, async_if_dir=False)  # Fast for files
+        else:
+            continue
+        try:
+            mod_time = os.path.getmtime(full_path)
+        except:
+            mod_time = 0
+        self.entries.append({'name': name, 'full_path': full_path, 'node': node, 'type': typ, 'mod_time': mod_time, 'size': size})
+
+    # Preload dir sizes in background
+    for e in [e for e in self.entries if e['type'] == 'dir']:
+        self.get_size(e['full_path'], async_if_dir=True)
+
+    self.apply_sort()
+    self.update_labels_visibility()
+    self.update_label_positions()
+    if self.loading_dialog:
+        self.loading_dialog.destroy()
+        self.loading_dialog = None
 
     def hex_positions(self, count, spacing):
         positions = []
