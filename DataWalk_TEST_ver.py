@@ -195,6 +195,16 @@ class DataWalk(ShowBase):
         self.target_np.setPos(1.6, 0, -0.91)
         self.target_text.setTextColor(1, 0.7, 1, 1)
 
+        # Status message HUD
+        self.status_text = TextNode('status')
+        self.status_text.setText("")
+        self.status_text.setAlign(TextNode.ACenter)
+        self.status_text.setWordwrap(20.0)
+        self.status_np = aspect2d.attachNewNode(self.status_text)
+        self.status_np.setScale(0.05)
+        self.status_np.setPos(0, 0, -0.91)
+        self.status_text.setTextColor(1, 1, 0, 1)
+
         self.accept("aspect_ratio_changed", self.update_hud_positions)
         self.update_hud_positions()
 
@@ -682,22 +692,28 @@ class DataWalk(ShowBase):
             return
         mode = self.current_sort_mode
         if mode in [3, 4]:
-            unfinished = [e for e in self.entries if e['type'] == 'dir' and (e['size'] == 0 or e['size'] == -1)]
+            unfinished = [e for e in self.entries if e['type'] == 'dir' and e['size'] in (0, -1)]
             if unfinished:
-                self.sort_progress_dialog = DirectLabel(text="Calculating directory sizes for sorting...\n0 / {}".format(len(unfinished)), scale=0.1, pos=(0,0,0))
-                self.sort_progress_total = len(unfinished)
+                self.status_text.setText("Calculating directory sizes for sorting...")
+                self.sort_unfinished = unfinished[:]
                 self.sort_progress_count = 0
-                self.taskMgr.add(self.check_sort_progress, "check_sort_progress")
+                self.taskMgr.add(self.sort_progress_task, "sort_progress_task")
                 return
         self.perform_sort()
 
-    def check_sort_progress(self, task):
-        unfinished = [e for e in self.entries if e['type'] == 'dir' and (e['size'] == 0 or e['size'] == -1)]
-        self.sort_progress_count = self.sort_progress_total - len(unfinished)
-        self.sort_progress_dialog['text'] = "Calculating directory sizes for sorting...\n{} / {}".format(self.sort_progress_count, self.sort_progress_total)
-        if len(unfinished) == 0:
-            self.sort_progress_dialog.destroy()
-            self.sort_progress_dialog = None
+    def sort_progress_task(self, task):
+        to_remove = []
+        for e in self.sort_unfinished:
+            path = e['full_path']
+            if path in self.sizes and self.sizes[path] != -1:
+                e['size'] = self.sizes[path]
+                to_remove.append(e)
+        for e in to_remove:
+            self.sort_unfinished.remove(e)
+            self.sort_progress_count += 1
+        self.status_text.setText("Calculating directory sizes for sorting... {} / {}".format(self.sort_progress_count, len(self.entries)))
+        if not self.sort_unfinished:
+            self.status_text.setText("")
             self.perform_sort()
             self.refresh_index()
             return Task.done
@@ -755,6 +771,11 @@ class DataWalk(ShowBase):
         if self.index_frame:
             self.index_frame.destroy()
             self.index_frame = None
+        if hasattr(self, 'sort_progress_dialog') and self.sort_progress_dialog:
+            self.sort_progress_dialog.destroy()
+            self.sort_progress_dialog = None
+        self.taskMgr.remove("sort_progress_task")
+        self.status_text.setText("")
 
     def teleport_to(self, name):
         building = self.buildings[name]
