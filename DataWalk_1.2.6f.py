@@ -11,12 +11,11 @@
 # 2. Install ALL the missing Python packages inside the venv:
 #    pip install ..this list needs to be corrected for the needed dependencies to help users auto-fix their install..
 # 3. Go to your script folder (with quotes because of spaces):
-#    cd "/media/z0m8i3d/Black_Stone/Documents/Visual DriveMapper (VDM)"
+#    cd "--your--file--location"
 # 4. Run: python DataWalk_1.2.3.py
 # To find your kill: ps aux | grep python
 # Kill top running: kill -9 PID#
 # Kill run-away intances (PID keeps chaning but all stable PIDs of grep list must be killed first): pkill -f DataWalk_1.2.3.py
-
 
 import sys
 import os
@@ -89,6 +88,8 @@ class DataWalk(ShowBase):
         self.rebind_mode = False
         self.keys = {"forward": 0, "backward": 0, "left": 0, "right": 0}
         self.buildings = {}
+        self.file_orbs = {}
+        self.entries = []
         self.window_labels = []
         self.building_labels = []
         self.show_window_titles = False
@@ -104,6 +105,9 @@ class DataWalk(ShowBase):
             (self.default_win_size[0] * 2, self.default_win_size[1] * 2),
             (self.display_width, self.display_height)
         ]
+        self.current_sort_mode = 0
+        self.last_index_click = {}
+        self.index_click_task = {}
 
         self.key_bindings = {
             "forward": ["w"],
@@ -123,6 +127,8 @@ class DataWalk(ShowBase):
             "open": ["space"],
             "hidden_toggle": ["n"]
         }
+
+        self.sizes = {}
 
         self.load_config()
 
@@ -184,7 +190,7 @@ class DataWalk(ShowBase):
         self.target_text.setWordwrap(12.0)
         self.target_np = aspect2d.attachNewNode(self.target_text)
         self.target_np.setScale(0.05)
-        self.target_np.setPos(1.6, 0, -0.9)
+        self.target_np.setPos(1.6, 0, -0.91)
         self.target_text.setTextColor(1, 0.7, 1, 1)
 
         self.accept("aspect_ratio_changed", self.update_hud_positions)
@@ -218,6 +224,7 @@ class DataWalk(ShowBase):
         self.is_default = self.config_data.get('is_default', False)
         self.original_default = self.config_data.get('original_default', None)
         self.beacons = self.config_data.get('beacons', [])
+        self.current_sort_mode = self.config_data.get('current_sort_mode', 0)
         self.save_config()
 
     def get_app_command(self):
@@ -292,6 +299,7 @@ class DataWalk(ShowBase):
         self.config_data['is_default'] = self.is_default
         self.config_data['original_default'] = self.original_default
         self.config_data['beacons'] = self.beacons
+        self.config_data['current_sort_mode'] = self.current_sort_mode
         with open(self.config_file, 'w') as f:
             json.dump(self.config_data, f, indent=4)
 
@@ -362,7 +370,7 @@ class DataWalk(ShowBase):
         self.path_np.setX(-aspect + 0.1)
         self.path_np.setZ(-0.95)
         self.target_np.setX(aspect - 0.1)
-        self.target_np.setZ(-0.95)
+        self.target_np.setZ(-0.91)
         self.path_text.setWordwrap((2 * aspect - 0.2) / 0.05)
         self.target_text.setWordwrap((aspect - 0.2) / 0.05)
         self.title_text.setWordwrap((2 * aspect) / 0.07)
@@ -626,26 +634,104 @@ class DataWalk(ShowBase):
 
         DirectButton(parent=self.index_frame, text="Return to Explorer", command=self.resume_index, pos=(0, 0, 0.8), scale=0.1, relief=DGG.RAISED)
 
+        # Footer for sorting buttons
+        footer = DirectFrame(parent=self.index_frame, frameSize=(-1.2, 1.2, -0.15, 0), pos=(0, 0, -0.75), frameColor=(0, 0, 0, 0.5))
+        button_texts = ['Name', 'Date Modified', 'Age', 'Size', 'Weight', 'Eman']
+        for i, text in enumerate(button_texts):
+            x_pos = -1.05 + i * 0.35
+            DirectButton(parent=footer, text=text, scale=0.05, pos=(x_pos, 0, 0),
+                         command=self.set_sort_mode, extraArgs=[i], relief=DGG.RAISED)
+
         self.scrolled_frame = DirectScrolledFrame(parent=self.index_frame,
             canvasSize=(-1.2, 1.2, -len(self.buildings)*0.1 - 0.2, 0),
             frameSize=(-1.2, 1.2, -0.7, 0.7),
             pos=(0, 0, 0),
             scrollBarWidth=0.05)
-        canvas = self.scrolled_frame.getCanvas()
 
+        self.last_index_click = {}
+        self.index_click_task = {}
+        self.refresh_index()
+
+    def refresh_index(self):
+        if not self.index_frame:
+            return
+        canvas = self.scrolled_frame.getCanvas()
+        for child in canvas.getChildren():
+            child.removeNode()
+
+        dir_entries = [e for e in self.entries if e['type'] == 'dir']
         y_pos = -0.1
-        for name in sorted(self.buildings.keys()):
-            DirectButton(parent=canvas, text=name, command=self.teleport_to, extraArgs=[name],
-                         pos=(0, 0, y_pos), scale=0.07, frameColor=(0,0,0,0))
+        for entry in dir_entries:
+            name = entry['name']
+            btn = DirectButton(parent=canvas, text=name, command=self.handle_index_click, extraArgs=[name],
+                               pos=(0, 0, y_pos), scale=0.07, frameColor=(0,0,0,0))
             y_pos -= 0.1
 
         self.scrolled_frame['canvasSize'] = (-1.2, 1.2, y_pos - 0.1, 0)
 
+    def set_sort_mode(self, mode):
+        self.current_sort_mode = mode
+        self.apply_sort()
+        self.refresh_index()
+        self.save_config()
+
+    def apply_sort(self):
+        if not self.entries:
+            return
+        mode = self.current_sort_mode
+        if mode in [3, 4]:
+            for entry in self.entries:
+                if entry['size'] == 0:
+                    entry['size'] = self.get_size(entry['full_path'])
+        if mode == 0:  # Name A first
+            self.entries.sort(key=lambda e: e['name'].lower(), reverse=False)
+        elif mode == 1:  # Date Modified newest first
+            self.entries.sort(key=lambda e: e['mod_time'], reverse=True)
+        elif mode == 2:  # Age eldest first
+            self.entries.sort(key=lambda e: e['mod_time'], reverse=False)
+        elif mode == 3:  # Size smallest first
+            self.entries.sort(key=lambda e: e['size'], reverse=False)
+        elif mode == 4:  # Weight largest % first
+            total_size = sum(e['size'] for e in self.entries)
+            self.entries.sort(key=lambda e: (e['size'] / total_size if total_size > 0 else 0), reverse=True)
+        elif mode == 5:  # Eman name Z first
+            self.entries.sort(key=lambda e: e['name'].lower(), reverse=True)
+
+        # Re-position nodes
+        positions = self.hex_positions(len(self.entries), spacing=self.spacing)
+        for i, entry in enumerate(self.entries):
+            x, y = positions[i]
+            z = 0 if entry['type'] == 'dir' else 20
+            entry['node'].setPos(x, y, z)
+
+    def handle_index_click(self, name):
+        now = globalClock.getRealTime()
+        if name in self.last_index_click and now - self.last_index_click[name] < 0.3:
+            if name in self.index_click_task:
+                self.taskMgr.remove(self.index_click_task[name])
+            # Double click: open
+            path = self.buildings[name].getPythonTag("full_path")
+            if os.path.isdir(path):
+                self.history.append((self.current_path, self.camera.getPos(), self.camera.getHpr()))
+                self.current_path = path
+                self.load_path(path)
+            self.resume_index()
+        else:
+            self.last_index_click[name] = now
+            task_name = 'index_single_' + name
+            self.index_click_task[name] = self.taskMgr.doMethodLater(0.3, self.perform_single_index_click, task_name, extraArgs=[name])
+
+    def perform_single_index_click(self, task, name):
+        if name in self.index_click_task:
+            del self.index_click_task[name]
+        self.teleport_to(name)
+
     def resume_index(self):
         self.in_menu = False
         base.disableMouse()
-        self.index_frame.destroy()
-        self.index_frame = None
+        if self.index_frame:
+            self.index_frame.destroy()
+            self.index_frame = None
 
     def teleport_to(self, name):
         building = self.buildings[name]
@@ -864,6 +950,8 @@ class DataWalk(ShowBase):
         self.path_text.setText(f"Location: {self.current_path}")
 
         self.buildings = {}
+        self.file_orbs = {}
+        self.entries = []
         self.window_labels = []
         self.building_labels = []
 
@@ -877,7 +965,7 @@ class DataWalk(ShowBase):
             ground.setPythonTag("type", "exit_ground")
 
         try:
-            entries = sorted(os.listdir(path))
+            entries = os.listdir(path)
             non_hidden = [e for e in entries if not e.startswith('.')]
             hidden = [e for e in entries if e.startswith('.')]
         except Exception as e:
@@ -917,6 +1005,26 @@ class DataWalk(ShowBase):
                 hz = self.max_height + 50 + (i % 5) * 10
                 self.create_star(hx, hy, hz, name, full_path)
 
+        # Build entries list
+        for name in non_hidden:
+            full_path = os.path.join(self.current_path, name)
+            if name in self.buildings:
+                node = self.buildings[name]
+                typ = 'dir'
+                size = 0  # Lazy load for dirs
+            elif name in self.file_orbs:
+                node = self.file_orbs[name]
+                typ = 'file'
+                size = self.get_size(full_path)  # Fast for files
+            else:
+                continue
+            try:
+                mod_time = os.path.getmtime(full_path)
+            except:
+                mod_time = 0
+            self.entries.append({'name': name, 'full_path': full_path, 'node': node, 'type': typ, 'mod_time': mod_time, 'size': size})
+
+        self.apply_sort()
         self.update_labels_visibility()
         self.update_label_positions()
 
@@ -1018,6 +1126,7 @@ class DataWalk(ShowBase):
         orb.setPythonTag("vdm", True)
         orb.setPythonTag("full_path", path)
         orb.setPythonTag("type", "file_orb")
+        self.file_orbs[name] = orb
         hue = (hash(name) % 360) / 360.0
         r, g, b = colorsys.hsv_to_rgb(hue, 0.9, 1.0)
         radius = 8 + min(size / 1e6 * 22, 28)
@@ -1101,6 +1210,38 @@ class DataWalk(ShowBase):
             lines.moveTo(radius * ca, radius * sa, 0)
             lines.drawTo(radius * -ca, radius * -sa, 0)
         parent.attachNewNode(lines.create())
+
+    def get_size(self, path):
+        if path in self.sizes:
+            return self.sizes[path]
+        if not os.path.exists(path):
+            size = 0
+        elif os.path.isfile(path):
+            try:
+                size = os.path.getsize(path)
+            except:
+                size = 0
+        else:
+            size = 0
+            for root, dirs, files in os.walk(path, onerror=None):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    try:
+                        size += os.path.getsize(fp)
+                    except:
+                        pass
+        self.sizes[path] = size
+        return size
+
+    def human_size(self, bytes_size):
+        if bytes_size == 0:
+            return "0 bytes"
+        size = float(bytes_size)
+        for unit in ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}".rstrip('0').rstrip('.')
+            size /= 1024.0
+        return f"{size:.1f} PB".rstrip('0').rstrip('.')
 
     def update_camera(self, task):
         if not self.controls_enabled:
@@ -1209,12 +1350,17 @@ class DataWalk(ShowBase):
                     self.selected_node.setColorScale(2.3, 1.9, 1.2, 1)
                     typ = self.selected_node.getPythonTag("type")
                     if typ in ["building", "file_orb", "star_dir", "star"]:
-                        name = os.path.basename(self.selected_node.getPythonTag("full_path"))
+                        path = self.selected_node.getPythonTag("full_path")
+                        name = os.path.basename(path)
+                        if path not in self.sizes:
+                            self.sizes[path] = self.get_size(path)
+                        size = self.sizes[path]
+                        size_str = self.human_size(size)
+                        self.target_text.setText(size_str + "\n" + name)
                     elif typ == "exit_ground":
-                        name = "Exit"
+                        self.target_text.setText("Exit")
                     else:
-                        name = ""
-                    self.target_text.setText(name)
+                        self.target_text.setText("")
                 else:
                     self.target_text.setText("")
                 self.previous_selected = self.selected_node
